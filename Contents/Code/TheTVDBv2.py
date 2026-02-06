@@ -298,7 +298,7 @@ def GetMetadata(media, movie, error_log, lang, metadata_source, AniDBid, TVDBid,
       
     ### Picture types JSON download ###
     Log.Info("--- images ---".ljust(157, '-'))
-    languages = [language.strip() for language in Prefs['PosterLanguagePriority'].split(',')]
+    languages = [lang.strip() for lang in Prefs['PosterLanguagePriority'].split(',')]
     Log.Info('languages: {}'.format(languages))
     for language in languages:
       try:     bannerTypes = Dict(LoadFileTVDB(id=TVDBid, filename='images_{}.json'.format(language), url=TVDB_SERIES_IMG_INFO_URL.format(id=TVDBid), headers={'Accept-Language': language}), 'data', default={})

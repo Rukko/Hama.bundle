@@ -47,14 +47,18 @@ THROTTLE          = {}
 
 ### Plex Library XML ###
 PLEX_LIBRARY, PLEX_LIBRARY_URL = {}, "http://localhost:32400/library/sections/"    # Allow to get the library name to get a log per library https://support.plex.tv/hc/en-us/articles/204059436-Finding-your-account-token-X-Plex-Token
+PLEX_LIBRARY_KEYS = {}  # path → section key, for API calls
 def GetPlexLibraries():
   try:
     library_xml = XML.ElementFromURL(PLEX_LIBRARY_URL, cacheTime=0, timeout=float(30), headers={"X-Plex-Token": os.environ['PLEXTOKEN']})
     PLEX_LIBRARY.clear()
+    PLEX_LIBRARY_KEYS.clear()
     Log.Root('Libraries: ')
     for directory in library_xml.iterchildren('Directory'):
       for location in directory:
-        if directory.get("agent") == "com.plexapp.agents.hama":  PLEX_LIBRARY[location.get("path")] = directory.get("title")  # Only pull libraries that use HAMA to prevent miss identification
+        if directory.get("agent") == "com.plexapp.agents.hama":
+          PLEX_LIBRARY[location.get("path")] = directory.get("title")  # Only pull libraries that use HAMA to prevent miss identification
+          PLEX_LIBRARY_KEYS[location.get("path")] = directory.get("key")
         Log.Root('[{}] id: {:>2}, type: {:<6}, agent: {:<30}, scanner: {:<30}, library: {:<24}, path: {}'.format('x' if directory.get("agent") == "com.plexapp.agents.hama" else ' ', directory.get("key"), directory.get('type'), directory.get("agent"), directory.get("scanner"), directory.get('title'), location.get("path")))
   except Exception as e:  Log.Root("PLEX_LIBRARY_URL - Exception: '{}'".format(e))
 
@@ -288,7 +292,42 @@ def GetStatusCode(url):
       request.get_method = lambda: 'HEAD'
       return urllib2.urlopen(request).getcode() # if "Content-Type: audio/mpeg" in response.info(): Log.Info("Content-Type: audio/mpeg")
     except Exception as e:  return str(e)
-  
+
+def SetOriginalTitleViaAPI(media, movie, metadata_id, original_title):
+  """Set original_title via Plex API for TV shows.
+     The Plex framework model (MetadataModel) defines original_title and the agent serializes it
+     to the XML metadata file correctly, but the Plex server binary does not sync this field from
+     the agent XML to the SQLite DB for TV shows (it does for Movies). This is a Plex server bug.
+     Workaround: use the same REST API that the Plex web UI uses to set original_title directly.
+  """
+  if movie or not original_title:  return
+  try:
+    from urllib import quote as url_quote
+    token = os.environ.get('PLEXTOKEN', '')
+    if not token:  Log.Info("[!] SetOriginalTitleViaAPI: PLEXTOKEN not available");  return
+    media_dir = GetMediaDir(media, movie)
+    library, root, path = GetLibraryRootPath(media_dir)
+    section_key = PLEX_LIBRARY_KEYS.get(root)
+    if not section_key:  Log.Info("[!] SetOriginalTitleViaAPI: section key not found for root: {}".format(root));  return
+    guid_prefix = 'com.plexapp.agents.hama://' + metadata_id
+    items_xml = XML.ElementFromURL(PLEX_LIBRARY_URL + section_key + '/all?type=2&X-Plex-Token=' + token, cacheTime=0, timeout=30)
+    plex_base = PLEX_LIBRARY_URL.rsplit('/library/', 1)[0]  # http://localhost:32400
+    for item in items_xml:
+      if (item.get('guid') or '').startswith(guid_prefix):
+        rating_key = item.get('ratingKey')
+        if rating_key:
+          current_ot = item.get('originalTitle') or ''
+          if current_ot == original_title:  Log.Info("[=] original_title already set via API for ratingKey {}: '{}'".format(rating_key, original_title));  return
+          encoded_title = url_quote(original_title.encode('utf-8') if isinstance(original_title, unicode) else original_title)
+          put_url = '{}/library/metadata/{}?originalTitle.value={}&originalTitle.locked=1&X-Plex-Token={}'.format(plex_base, rating_key, encoded_title, token)
+          request = urllib2.Request(put_url)
+          request.get_method = lambda: 'PUT'
+          urllib2.urlopen(request, timeout=10)
+          Log.Info("[+] original_title set via API for ratingKey {}: '{}'".format(rating_key, original_title))
+          return
+    Log.Info("[!] SetOriginalTitleViaAPI: item not found for GUID: {}".format(guid_prefix))
+  except Exception as e:  Log.Info("[!] SetOriginalTitleViaAPI failed: {}".format(e))
+
 def SaveFile(filename="", file="", relativeDirectory=""):
   ''' Save file to cache, Thanks Dingmatt for folder creation ability
   '''
@@ -688,7 +727,15 @@ def UpdateMeta(metadata, media, movie, MetaSources, mappingList):
       elif not Dict(count, field) and Prefs[field]!="None" and source_list:  Log.Info("[#] {field:<29}  Sources: {sources:<60}  Inside: {source_list}  Values: {values}".format(field=field, sources='' if field=='season' else Prefs[field], source_list=source_list, values=Dict(MetaSources, source, field)))
     
     #if field=='posters':  metadata.thumbs.validate_keys(meta_new.keys())
-    
+
+  # Set original_title via Plex API for TV shows (framework setattr doesn't persist to DB)
+  if not movie and Prefs['original_title'] and Prefs['original_title'] != 'None':
+    for ot_source in [s.strip() for s in Prefs['original_title'].split(',')]:
+      ot_value = Dict(MetaSources, ot_source, 'original_title')
+      if ot_value:
+        SetOriginalTitleViaAPI(media, movie, metadata.id, ot_value)
+        break
+
   if not movie:
     ### AniDB poster as season poster backup ###
     #if (metadata.id.startswith("tvdb") or max(map(int, media.seasons.keys())) >1) and Dict(mappingList, 'defaulttvdbseason'): # defaulttvdb season isdigit and assigned to 1 tvdb season (even if it is season 0)
@@ -779,8 +826,8 @@ def poster_rank(source, image_type, language='en', rank_adjustment=0):
   max_rank = 100
   if image_type == 'seasons':  image_type = 'posters'
 
-  language_posters = [language.strip() for language in Prefs['PosterLanguagePriority'].split(',')]
-  priority_posters = [provider.strip() for provider in Prefs[image_type              ].split(',')]
+  language_posters = [lang.strip() for lang in Prefs['PosterLanguagePriority'].split(',')]
+  priority_posters = [prov.strip() for prov in Prefs[image_type              ].split(',')]
 
   lp_len = len(language_posters)
   pp_len = len(priority_posters)
