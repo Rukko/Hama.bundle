@@ -293,6 +293,8 @@ def GetStatusCode(url):
       return urllib2.urlopen(request).getcode() # if "Content-Type: audio/mpeg" in response.info(): Log.Info("Content-Type: audio/mpeg")
     except Exception as e:  return str(e)
 
+RATING_KEY_CACHE = {}  # guid_prefix -> (ratingKey, originalTitle)
+
 def SetOriginalTitleViaAPI(media, movie, metadata_id, original_title):
   """Set original_title via Plex API for TV shows.
      The Plex framework model (MetadataModel) defines original_title and the agent serializes it
@@ -305,26 +307,34 @@ def SetOriginalTitleViaAPI(media, movie, metadata_id, original_title):
     from urllib import quote as url_quote
     token = os.environ.get('PLEXTOKEN', '')
     if not token:  Log.Info("[!] SetOriginalTitleViaAPI: PLEXTOKEN not available");  return
-    media_dir = GetMediaDir(media, movie)
-    library, root, path = GetLibraryRootPath(media_dir)
-    section_key = PLEX_LIBRARY_KEYS.get(root)
-    if not section_key:  Log.Info("[!] SetOriginalTitleViaAPI: section key not found for root: {}".format(root));  return
     guid_prefix = 'com.plexapp.agents.hama://' + metadata_id
-    items_xml = XML.ElementFromURL(PLEX_LIBRARY_URL + section_key + '/all?type=2&X-Plex-Token=' + token, cacheTime=0, timeout=30)
-    plex_base = PLEX_LIBRARY_URL.rsplit('/library/', 1)[0]  # http://localhost:32400
-    for item in items_xml:
-      if (item.get('guid') or '').startswith(guid_prefix):
-        rating_key = item.get('ratingKey')
-        if rating_key:
-          current_ot = item.get('originalTitle') or ''
-          if current_ot == original_title:  Log.Info("[=] original_title already set via API for ratingKey {}: '{}'".format(rating_key, original_title));  return
-          encoded_title = url_quote(original_title.encode('utf-8') if isinstance(original_title, unicode) else original_title)
-          put_url = '{}/library/metadata/{}?originalTitle.value={}&originalTitle.locked=1&X-Plex-Token={}'.format(plex_base, rating_key, encoded_title, token)
-          request = urllib2.Request(put_url)
-          request.get_method = lambda: 'PUT'
-          urllib2.urlopen(request, timeout=10)
-          Log.Info("[+] original_title set via API for ratingKey {}: '{}'".format(rating_key, original_title))
-          return
+    plex_base = PLEX_LIBRARY_URL.rsplit('/library/', 1)[0]
+
+    # Build cache once per scan cycle (keyed by guid prefix)
+    if not RATING_KEY_CACHE:
+      media_dir = GetMediaDir(media, movie)
+      library, root, path = GetLibraryRootPath(media_dir)
+      section_key = PLEX_LIBRARY_KEYS.get(root)
+      if not section_key:  Log.Info("[!] SetOriginalTitleViaAPI: section key not found for root: {}".format(root));  return
+      items_xml = XML.ElementFromURL(PLEX_LIBRARY_URL + section_key + '/all?type=2&X-Plex-Token=' + token, cacheTime=0, timeout=30)
+      for item in items_xml:
+        item_guid = item.get('guid') or ''
+        rk = item.get('ratingKey')
+        if rk:  RATING_KEY_CACHE[item_guid] = (rk, item.get('originalTitle') or '')
+      Log.Info("[*] SetOriginalTitleViaAPI: cached {} items".format(len(RATING_KEY_CACHE)))
+
+    # Lookup by guid prefix
+    for cached_guid, (rating_key, current_ot) in RATING_KEY_CACHE.items():
+      if cached_guid.startswith(guid_prefix):
+        if current_ot == original_title:  Log.Info("[=] original_title already set via API for ratingKey {}: '{}'".format(rating_key, original_title));  return
+        encoded_title = url_quote(original_title.encode('utf-8') if isinstance(original_title, unicode) else original_title)
+        put_url = '{}/library/metadata/{}?originalTitle.value={}&originalTitle.locked=1&X-Plex-Token={}'.format(plex_base, rating_key, encoded_title, token)
+        request = urllib2.Request(put_url)
+        request.get_method = lambda: 'PUT'
+        urllib2.urlopen(request, timeout=10)
+        RATING_KEY_CACHE[cached_guid] = (rating_key, original_title)  # Update cache
+        Log.Info("[+] original_title set via API for ratingKey {}: '{}'".format(rating_key, original_title))
+        return
     Log.Info("[!] SetOriginalTitleViaAPI: item not found for GUID: {}".format(guid_prefix))
   except Exception as e:  Log.Info("[!] SetOriginalTitleViaAPI failed: {}".format(e))
 

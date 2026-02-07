@@ -158,6 +158,7 @@ def GetMetadata(media, movie, error_log, id):
       for season in anime.iter('mapping'):  ### mapping list: <mapping-list> <mapping anidbseason="0" tvdbseason="0">;1-12;2-14;3-16;4-18;</mapping> </mapping-list> 
         anidbseason, tvdbseason, offset, start, end = season.get('anidbseason'), season.get('tvdbseason'), season.get('offset') or '0', season.get('start'), season.get('end')
         Log.Info("    - season: [{:>2}],           [{:>2}], range:       [{:>3}-{:>3}], offset: {:>3}, text: {}".format(anidbseason, tvdbseason, start or '000', end or '000', offset, (season.text or '').strip(';')))
+        if tvdbseason is None:  continue  # Skip TMDB-only mapping entries (no tvdbseason attribute)
         for ep in range(int(start), int(end or '0')+1)        if start       else []:
           #Log.Info("[?] start: {}, end: {}, ep: {}".format(start, end, ep))
           if not Dict(mappingList, 'TVDB', 's'+tvdbseason+'e'+str(ep+int(offset))):
@@ -177,9 +178,11 @@ def GetMetadata(media, movie, error_log, id):
     ### 
     if TVDBid=="hentai":  SaveDict("X", AnimeLists_dict, 'content_rating')
     elif TVDBid in ("", "unknown", None):
-      link = SCUDLEE_FEEDBACK.format(title="[HAMA] AniDB ID:%s" % AniDB_id, anidb_title=GetXml(anime, 'name'), anidb_id=AniDB_id)
-      error_log['anime-list TVDBid missing'].append('AniDBid: "{}" | Title: "{}" | Has no matching TVDBid "{}" in mapping file | <a href="{}" target="_blank">Submit bug report</a>'.format(AniDB_id, "title", TVDBid, link))
-      Log.Info('"anime-list TVDBid missing.htm" log added as tvdb serie id missing in mapping file: "{}"'.format("None" if TVDBid is None else TVDBid))
+      try:
+        link = SCUDLEE_FEEDBACK.format(title="[HAMA] AniDB ID:%s" % (AniDB_id or ''), anidb_title=GetXml(anime, 'name') or '', anidb_id=AniDB_id or '')
+        error_log['anime-list TVDBid missing'].append('AniDBid: "{}" | Title: "{}" | Has no matching TVDBid "{}" in mapping file | <a href="{}" target="_blank">Submit bug report</a>'.format(AniDB_id or '', "title", TVDBid or '', link))
+        Log.Info('"anime-list TVDBid missing.htm" log added as tvdb serie id missing in mapping file: "{}"'.format("None" if TVDBid is None else TVDBid))
+      except Exception as e:  Log.Info("[!] anime-list TVDBid missing log error: {}".format(e))
         
     # guid need 1 entry only, not an TheTVDB numbered serie with anidb guid
     if (AniDB_id or TMDB_id or IMDB_id) and (movie or max(map(int, media.seasons.keys()))<=1):  break
